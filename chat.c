@@ -13,10 +13,12 @@
 #include <fcntl.h>
 
 
-#define MAXBUFLEN 100
+#define MAXBUFLEN 256
 
 LIST *MessageReceiveQueue;
 LIST *MessageSendQueue;
+
+pthread_t receiveMessage, sendMessage, readKeyboard, writeScreen;
 
 pthread_mutex_t receiveLock;
 pthread_mutex_t sendLock;
@@ -24,6 +26,8 @@ pthread_mutex_t emptyReceiveMutex;
 pthread_mutex_t emptySendMutex;
 pthread_cond_t emptyReceiveList;
 pthread_cond_t emptySendList;
+
+int MessageCounter = 0;
 
 typedef struct sendParams {
     int socketID;
@@ -33,6 +37,7 @@ typedef struct sendParams {
 
 void printList(LIST *list) {
   Node *head = list->head;
+  printf("List is:\n");
   while(head) {
     printf("%s\n", (char *)head->item);
     head = head->next;
@@ -43,20 +48,24 @@ void *receiveUDP (void *arg) {
     socklen_t addrlen;
     struct sockaddr_storage their_addr;
     int *number;
-    char message[100];
+    char message[MAXBUFLEN];
     int id= *(int *)arg;
 
     while (1) {
-        printf("Waiting to receive message\n");
-        recvfrom(id, message, 100, 0,(struct sockaddr *)&their_addr, &addrlen);
-        printf("Received message to print\n");
+        recvfrom(id, message, MAXBUFLEN, 0,(struct sockaddr *)&their_addr, &addrlen);
         pthread_mutex_lock(&receiveLock);
-        ListPrepend(MessageReceiveQueue, &message);
+        ListPrepend(MessageReceiveQueue, message);
         pthread_mutex_unlock(&receiveLock);
-        pthread_mutex_lock(&emptyReceiveMutex);
-        pthread_cond_signal(&emptyReceiveList);
-        pthread_mutex_unlock(&emptyReceiveMutex);
+        if(ListCount(MessageReceiveQueue) == 1) {
+            pthread_mutex_lock(&emptyReceiveMutex);
+            pthread_cond_signal(&emptyReceiveList);
+            pthread_mutex_unlock(&emptyReceiveMutex);
+        }
+        if (message[0] == '!') {
+            break;
+        }
     }
+    sleep(0.5);
     pthread_exit(NULL);
 
 }
@@ -65,63 +74,79 @@ void *sendUDP (void *arg) {
     mystruct *params = (mystruct *)arg;
     int numbytes;
     char *message;
+    int exit = 0;
     while (1) {
         pthread_mutex_lock(&emptySendMutex);
         if (ListCount(MessageSendQueue) == 0) {
-            printf("Waiting on message to send\n");
             pthread_cond_wait(&emptySendList, &emptySendMutex);
         }
         pthread_mutex_unlock(&emptySendMutex);
-        printf("Received message to send\n");
         pthread_mutex_lock(&sendLock);
         message = ListTrim(MessageSendQueue);
+        if (*message == '!') {
+            exit = 1;
+        }
+        MessageCounter--;
         pthread_mutex_unlock(&sendLock);
-        numbytes = sendto(params->socketID,  message, 100, 0, params->addr, params->addr_len);
-        printf("Sent message\n");
+        numbytes = sendto(params->socketID,  message, MAXBUFLEN, 0, params->addr, params->addr_len);
+        if (exit) {
+            
+            break;
+        }
     }
+    pthread_cancel(writeScreen);
+    pthread_cancel(receiveMessage);   
     pthread_exit(NULL);
 
 }
 
 void *readMessage (void *arg) {
-    char message[100];
+    char message[10][MAXBUFLEN];
     int i = 0;
+    int exit = 0;
     while (1) {
-      //printf("Waiting on input\n");
-      if (fgets(message, 100, stdin) == NULL) {
-        continue;
-      }
-      if(message[0] == '\n') {
-        continue;
-      }
-      pthread_mutex_lock(&sendLock);
-      ListPrepend(MessageSendQueue, &message);
-      printf("Put message on send queue\n");
-      pthread_mutex_unlock(&sendLock);
-      pthread_mutex_lock(&emptySendMutex);
-      pthread_cond_signal(&emptySendList);
-      pthread_mutex_unlock(&emptySendMutex);
+        if (fgets(message[MessageCounter], MAXBUFLEN, stdin) == NULL) {
+            continue;
+        }
+        if(message[MessageCounter][0] == '\n') {
+            continue;
+        }
+        if(message[MessageCounter][0] == '!') {
+            exit = 1;
+        }
+        pthread_mutex_lock(&sendLock);
+        ListPrepend(MessageSendQueue, &message[MessageCounter++]);
+        pthread_mutex_unlock(&sendLock);
+        if (ListCount(MessageSendQueue) == 1) {
+            pthread_mutex_lock(&emptySendMutex);
+            pthread_cond_signal(&emptySendList);
+            pthread_mutex_unlock(&emptySendMutex);
+        }
+        if (exit) {
+            break;
+        }
     }
     pthread_exit(NULL);
 }
 
 void *printMessage (void *arg) {
     char *message;
-    int j = 0;
     while (1) {
       pthread_mutex_lock(&emptyReceiveMutex);
       if (ListCount(MessageReceiveQueue) == 0) {
-          printf("Waiting on message to print\n");
           pthread_cond_wait(&emptyReceiveList, &emptyReceiveMutex);
       }
       pthread_mutex_unlock(&emptyReceiveMutex);
-      printf("Recevied message to print\n");
       pthread_mutex_lock(&receiveLock);
       message = ListTrim(MessageReceiveQueue);
       pthread_mutex_unlock(&receiveLock);
+      if(message[0] == '!') {
+        break;
+      }
       fputs(message, stdout);
     }
-
+    pthread_cancel(sendMessage);
+    pthread_cancel(readKeyboard);
     pthread_exit(NULL);
 
 }
@@ -131,7 +156,6 @@ void *printMessage (void *arg) {
 int main(int argc, char *argv[])
 {
 
-    pthread_t recvfrom, sendto, read, write;
     int thread1, thread2, thread3, thread4;
 
     fcntl(0, F_SETFL, O_NONBLOCK);  // set to non-blocking
@@ -143,12 +167,12 @@ int main(int argc, char *argv[])
     struct addrinfo hints, *servinfo, *p, *q;
     int rv;
     struct sockaddr_storage their_addr;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC; // set to AF_INET to force IPv4
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_flags = AI_PASSIVE; // use my IP
+    hints.ai_flags = AI_PASSIVE;
 
-    if ((rv = getaddrinfo(argv[1], argv[2], &hints, &servinfo)) != 0) {
+    if ((rv = getaddrinfo(argv[2], argv[3], &hints, &servinfo)) != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
@@ -162,7 +186,7 @@ int main(int argc, char *argv[])
         break;
     }
 
-    if ((rv = getaddrinfo(NULL, argv[3], &hints, &servinfo)) != 0) {
+    if ((rv = getaddrinfo(NULL, argv[1], &hints, &servinfo)) != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
@@ -191,16 +215,17 @@ int main(int argc, char *argv[])
     params->addr_len = q->ai_addrlen;
 
 
-    thread1 = pthread_create(&recvfrom, NULL, receiveUDP, (void *)&sockfd);
-    thread2 = pthread_create(&sendto, NULL, sendUDP, (void *)params);
-    thread3 = pthread_create(&read, NULL, readMessage, NULL);
-    thread4 = pthread_create(&write, NULL, printMessage, NULL);
+    thread1 = pthread_create(&receiveMessage, NULL, receiveUDP, (void *)&sockfd);
+    thread2 = pthread_create(&sendMessage, NULL, sendUDP, (void *)params);
+    thread3 = pthread_create(&readKeyboard, NULL, readMessage, NULL);
+    thread4 = pthread_create(&writeScreen, NULL, printMessage, NULL);
 
-    pthread_join(recvfrom, NULL);
-    pthread_join(sendto, NULL);
-    pthread_join(read, NULL);
-    pthread_join(write, NULL);
+    pthread_join(receiveMessage, NULL);
+    pthread_join(readKeyboard, NULL);
+    pthread_join(writeScreen, NULL);
+    pthread_join(sendMessage, NULL);
 
+    printf("Thanks for chatting!\n");
 
     close(sockfd);
 
