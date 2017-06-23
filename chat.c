@@ -111,7 +111,7 @@ void *readMessage (void *arg) {
         if(message[MessageCounter][0] == '\n') {
             continue;
         }
-        if(message[MessageCounter][0] == '!') {
+        if(message[MessageCounter][0] == '!' && strlen(message[MessageCounter]) == 2) {
             exit = 1;
         }
         pthread_mutex_lock(&sendLock);
@@ -140,7 +140,7 @@ void *printMessage (void *arg) {
       pthread_mutex_lock(&receiveLock);
       message = ListTrim(MessageReceiveQueue);
       pthread_mutex_unlock(&receiveLock);
-      if(message[0] == '!') {
+      if(message[0] == '!' && strlen(message) == 2) {
         break;
       }
       fputs(message, stdout);
@@ -214,18 +214,20 @@ int main(int argc, char *argv[])
     params->addr = q->ai_addr;
     params->addr_len = q->ai_addrlen;
 
-
+    printf("Welcome to s-talk\nBegin chatting by typing a message:\n");
     thread1 = pthread_create(&receiveMessage, NULL, receiveUDP, (void *)&sockfd);
     thread2 = pthread_create(&sendMessage, NULL, sendUDP, (void *)params);
     thread3 = pthread_create(&readKeyboard, NULL, readMessage, NULL);
     thread4 = pthread_create(&writeScreen, NULL, printMessage, NULL);
+
+
 
     pthread_join(receiveMessage, NULL);
     pthread_join(readKeyboard, NULL);
     pthread_join(writeScreen, NULL);
     pthread_join(sendMessage, NULL);
 
-    printf("Thanks for chatting!\n");
+    printf("Terminating chat\n");
 
     close(sockfd);
 
