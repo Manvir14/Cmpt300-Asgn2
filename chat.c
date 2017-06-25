@@ -35,15 +35,6 @@ typedef struct sendParams {
     size_t addr_len;
 } mystruct;
 
-void printList(LIST *list) {
-  Node *head = list->head;
-  printf("List is:\n");
-  while(head) {
-    printf("%s\n", (char *)head->item);
-    head = head->next;
-  }
-}
-
 void *receiveUDP (void *arg) {
     socklen_t addrlen;
     struct sockaddr_storage their_addr;
@@ -61,7 +52,7 @@ void *receiveUDP (void *arg) {
             pthread_cond_signal(&emptyReceiveList);
             pthread_mutex_unlock(&emptyReceiveMutex);
         }
-        if (message[0] == '!') {
+        if (message[0] == '!' && strlen(message) == 2) {
             break;
         }
     }
@@ -83,14 +74,13 @@ void *sendUDP (void *arg) {
         pthread_mutex_unlock(&emptySendMutex);
         pthread_mutex_lock(&sendLock);
         message = ListTrim(MessageSendQueue);
-        if (*message == '!') {
+        if (*message == '!' && strlen(message) == 2) {
             exit = 1;
         }
         MessageCounter--;
         pthread_mutex_unlock(&sendLock);
         numbytes = sendto(params->socketID,  message, MAXBUFLEN, 0, params->addr, params->addr_len);
         if (exit) {
-            
             break;
         }
     }
@@ -105,6 +95,7 @@ void *readMessage (void *arg) {
     int i = 0;
     int exit = 0;
     while (1) {
+        // Used fgets because stdin is non-blocking now
         if (fgets(message[MessageCounter], MAXBUFLEN, stdin) == NULL) {
             continue;
         }
@@ -131,6 +122,7 @@ void *readMessage (void *arg) {
 
 void *printMessage (void *arg) {
     char *message;
+    char remote[4] = "R: ";
     while (1) {
       pthread_mutex_lock(&emptyReceiveMutex);
       if (ListCount(MessageReceiveQueue) == 0) {
@@ -143,6 +135,7 @@ void *printMessage (void *arg) {
       if(message[0] == '!' && strlen(message) == 2) {
         break;
       }
+      fputs(remote, stdout);
       fputs(message, stdout);
     }
     pthread_cancel(sendMessage);
@@ -158,15 +151,15 @@ int main(int argc, char *argv[])
 
     int thread1, thread2, thread3, thread4;
 
-    fcntl(0, F_SETFL, O_NONBLOCK);  // set to non-blocking
+    fcntl(0, F_SETFL, O_NONBLOCK);  // set stdin and stdout to non-blocking
     fcntl(1, F_SETFL, O_NONBLOCK);
+
     MessageSendQueue = ListCreate();
     MessageReceiveQueue = ListCreate();
 
     int sockfd;
-    struct addrinfo hints, *servinfo, *p, *q;
+    struct addrinfo hints, *servinfo, *local, *remote;
     int rv;
-    struct sockaddr_storage their_addr;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
@@ -177,10 +170,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    for(q = servinfo; q != NULL; q = q->ai_next) {
-        if ((sockfd = socket(q->ai_family, q->ai_socktype,
-                q->ai_protocol)) == -1) {
-            perror("listener: socket");
+    for(remote = servinfo; remote != NULL; remote = remote->ai_next) {
+        if ((sockfd = socket(remote->ai_family, remote->ai_socktype,
+                remote->ai_protocol)) == -1) {
+            perror("Error creating socket");
             continue;
         }
         break;
@@ -191,10 +184,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    for(p = servinfo; p != NULL; p = p->ai_next) {
-         if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+    for(local = servinfo; local != NULL; local = local->ai_next) {
+         if (bind(sockfd, local->ai_addr, local->ai_addrlen) == -1) {
             close(sockfd);
-            perror("listener: bind");
+            perror("Error binding socket");
             continue;
         }
         break;
@@ -202,8 +195,8 @@ int main(int argc, char *argv[])
     }
 
 
-    if (p == NULL) {
-        fprintf(stderr, "listener: failed to bind socket\n");
+    if (local == NULL) {
+        fprintf(stderr, "Couldn't bind socket\n");
         return 2;
     }
 
@@ -211,10 +204,13 @@ int main(int argc, char *argv[])
 
     mystruct *params = malloc(sizeof(mystruct));
     params->socketID = sockfd;
-    params->addr = q->ai_addr;
-    params->addr_len = q->ai_addrlen;
+    params->addr = remote->ai_addr;
+    params->addr_len = remote->ai_addrlen;
 
-    printf("Welcome to s-talk\nBegin chatting by typing a message:\n");
+    printf("Welcome to s-talk\n");
+    printf("To close the chat, enter '!'\n");
+    printf("Message beginning with R: is from remote host\n");
+    printf("Begin chatting by typing a message:\n");
     thread1 = pthread_create(&receiveMessage, NULL, receiveUDP, (void *)&sockfd);
     thread2 = pthread_create(&sendMessage, NULL, sendUDP, (void *)params);
     thread3 = pthread_create(&readKeyboard, NULL, readMessage, NULL);
